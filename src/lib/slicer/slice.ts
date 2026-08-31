@@ -1,5 +1,6 @@
-import type { Loop, SliceSettings, SliceResult, Triangle, Vec2, Vec3 } from "./types";
+import type { Loop, SliceSettings, SliceResult, SupportPillar, Triangle, Vec2, Vec3 } from "./types";
 import { insetLoop, scanlineFill } from "./polygon";
+import { generateSupportPillars, pillarSquareLoop } from "./support";
 
 function key(p: Vec2, precision = 10000): string {
   return `${Math.round(p.x * precision)}_${Math.round(p.y * precision)}`;
@@ -108,8 +109,21 @@ export function computeBounds(triangles: Triangle[]): { min: Vec3; max: Vec3 } {
   return { min, max };
 }
 
+function buildInsetWalls(loop: Loop, settings: SliceSettings): Loop[] {
+  const insets: Loop[] = [];
+  for (let w = 0; w < settings.wallLoops; w++) {
+    const dist = settings.extrusionWidthMm * (0.5 + w);
+    const inset = insetLoop(loop, dist);
+    if (!inset) break;
+    insets.push(inset);
+  }
+  if (insets.length === 0) insets.push(loop);
+  return insets;
+}
+
 export function sliceMesh(triangles: Triangle[], settings: SliceSettings): SliceResult {
   const { min, max } = computeBounds(triangles);
+  const pillars: SupportPillar[] = generateSupportPillars(triangles, settings);
 
   const layerZs: { z: number; h: number }[] = [];
   let z = min.z + settings.firstLayerHeightMm;
@@ -132,18 +146,12 @@ export function sliceMesh(triangles: Triangle[], settings: SliceSettings): Slice
     const { z: planeZ, h } = layerZs[i];
     const rawLoops = sliceLayerLoops(triangles, planeZ);
 
-    const perimeters: Loop[][] = [];
-    for (const loop of rawLoops) {
-      const insets: Loop[] = [];
-      for (let w = 0; w < settings.wallLoops; w++) {
-        const dist = settings.extrusionWidthMm * (0.5 + w);
-        const inset = insetLoop(loop, dist);
-        if (!inset) break;
-        insets.push(inset);
-      }
-      if (insets.length === 0) insets.push(loop);
-      perimeters.push(insets);
-    }
+    const perimeters: Loop[][] = rawLoops.map((loop) => buildInsetWalls(loop, settings));
+
+    const activePillars = pillars.filter((p) => p.topZ > planeZ);
+    const supports: Loop[][] = activePillars.map((p) =>
+      buildInsetWalls(pillarSquareLoop(p, settings.supportPillarSizeMm), settings)
+    );
 
     const innermostLoops = perimeters
       .map((insets) => insets[insets.length - 1])
@@ -172,7 +180,7 @@ export function sliceMesh(triangles: Triangle[], settings: SliceSettings): Slice
     // --- Estimate extruded volume & time for this layer ---
     const speed = i === 0 ? settings.firstLayerSpeedMmS : settings.printSpeedMmS;
     let layerLengthMm = 0;
-    for (const insets of perimeters) {
+    for (const insets of [...perimeters, ...supports]) {
       for (const loop of insets) {
         layerLengthMm += loopPerimeterLength(loop);
       }
@@ -186,7 +194,7 @@ export function sliceMesh(triangles: Triangle[], settings: SliceSettings): Slice
     // Add a rough travel-time allowance (10% overhead) plus per-layer Z hop/settle.
     totalTimeSec += 1.5;
 
-    layers.push({ z: planeZ + h / 2, layerHeight: h, perimeters, infill, solid });
+    layers.push({ z: planeZ + h / 2, layerHeight: h, perimeters, infill, solid, supports });
   }
 
   const estimatedFilamentMm = totalExtrudedVolumeMm3 / filamentArea;

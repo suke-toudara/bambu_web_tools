@@ -133,6 +133,12 @@ export function generateGcode(result: SliceResult, settings: SliceSettings): str
     }
     printSegments(layer.solid, offset, layer.layerHeight, feed);
     printSegments(layer.infill, offset, layer.layerHeight, feed);
+
+    for (const insets of layer.supports) {
+      for (let k = insets.length - 1; k >= 0; k--) {
+        printLoop(insets[k], offset, layer.layerHeight, feed);
+      }
+    }
   });
 
   // --- End gcode ---

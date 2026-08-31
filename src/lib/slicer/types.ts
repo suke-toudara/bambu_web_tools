@@ -41,6 +41,18 @@ export interface SliceSettings {
   retractionSpeedMmS: number;
   bedSizeXMm: number;
   bedSizeYMm: number;
+  supportEnabled: boolean;
+  /** Max angle (degrees) from vertical a surface can lean before it's
+   * considered an unsupported overhang. 0 = only flat ceilings get
+   * support, 90 = everything (including vertical walls) would. */
+  supportOverhangAngleDeg: number;
+  /** Grid spacing (mm) between support pillars. */
+  supportSpacingMm: number;
+  /** Square cross-section size (mm) of each support pillar. */
+  supportPillarSizeMm: number;
+  /** Vertical gap (mm) left between a pillar's top and the overhang it
+   * holds up, so the support can be snapped off cleanly. */
+  supportTopGapMm: number;
 }
 
 export const DEFAULT_SLICE_SETTINGS: SliceSettings = {
@@ -63,6 +75,11 @@ export const DEFAULT_SLICE_SETTINGS: SliceSettings = {
   retractionSpeedMmS: 35,
   bedSizeXMm: 256,
   bedSizeYMm: 256,
+  supportEnabled: false,
+  supportOverhangAngleDeg: 45,
+  supportSpacingMm: 4,
+  supportPillarSizeMm: 1.6,
+  supportTopGapMm: 0.2,
 };
 
 export interface LayerPaths {
@@ -71,6 +88,14 @@ export interface LayerPaths {
   perimeters: Loop[][]; // per original loop: list of inset loops (outer -> inner)
   infill: [Vec2, Vec2][]; // line segments
   solid: [Vec2, Vec2][]; // top/bottom solid fill segments
+  supports: Loop[][]; // per support pillar: list of inset loops (same shape as perimeters)
+}
+
+export interface SupportPillar {
+  x: number;
+  y: number;
+  /** Height (mm) the pillar reaches up to, measured from the build plate. */
+  topZ: number;
 }
 
 export interface SliceResult {

@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { parseStepFile, type OcctMesh } from "@/lib/occt/loadStep";
-import { mergeMeshesToTriangleSoup } from "@/lib/occt/mergeMeshes";
+import { loadModelFile } from "@/lib/loaders/loadModelFile";
+import { autoPlaceBatch } from "@/lib/scene/autoPlace";
+import { exportPlateTriangleSoup } from "@/lib/scene/exportPlate";
+import { partWorldBounds } from "@/lib/scene/transform";
+import type { PlacedPart } from "@/lib/scene/types";
 import { meshToBinaryStl } from "@/lib/stl/exportBinaryStl";
 import { DEFAULT_SLICE_SETTINGS, type SliceSettings } from "@/lib/slicer/types";
 import type { LayerPreviewData } from "@/components/LayerPreview";
+import PartList from "@/components/PartList";
 
 const ModelViewer = dynamic(() => import("@/components/ModelViewer"), { ssr: false });
 const LayerPreview = dynamic(() => import("@/components/LayerPreview"), { ssr: false });
@@ -27,6 +31,7 @@ interface PrinterConn {
 }
 
 const STORAGE_KEY = "bambu-web-tools:printer";
+const STATUS_POLL_MS = 5000;
 
 function formatDuration(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -36,10 +41,10 @@ function formatDuration(sec: number): string {
 }
 
 export default function Home() {
-  const [meshes, setMeshes] = useState<OcctMesh[] | null>(null);
-  const [fileName, setFileName] = useState<string>("");
-  const [parsing, setParsing] = useState(false);
-  const [parseError, setParseError] = useState<string | null>(null);
+  const [parts, setParts] = useState<PlacedPart[]>([]);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<SliceSettings>(DEFAULT_SLICE_SETTINGS);
   const [slicing, setSlicing] = useState(false);
@@ -51,6 +56,7 @@ export default function Home() {
   const [printer, setPrinter] = useState<PrinterConn>({ host: "", serial: "", accessCode: "" });
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [printerStatus, setPrinterStatus] = useState<any>(null);
 
@@ -83,41 +89,78 @@ export default function Home() {
     }
   }, [printer]);
 
-  const stlBlob = useMemo(() => {
-    if (!meshes || meshes.length === 0) return null;
-    const soup = mergeMeshesToTriangleSoup(meshes);
-    return meshToBinaryStl(soup, null);
-  }, [meshes]);
-
-  async function handleFile(file: File) {
-    setParseError(null);
-    setParsing(true);
-    setMeshes(null);
+  function invalidateSlice() {
     setGcode(null);
     setStats(null);
     setLayerPreview([]);
-    setFileName(file.name);
+  }
+
+  async function handleFiles(files: FileList) {
+    setLoadError(null);
+    setLoadingFiles(true);
+    let alreadySelected = selectedPartId !== null;
     try {
-      const buffer = await file.arrayBuffer();
-      const result = await parseStepFile(buffer);
-      setMeshes(result.meshes);
+      for (const file of Array.from(files)) {
+        const batch = await loadModelFile(file);
+        setParts((prev) => {
+          const placed = autoPlaceBatch(batch, prev, settings.bedSizeXMm, settings.bedSizeYMm);
+          if (!alreadySelected && placed.length > 0) {
+            alreadySelected = true;
+            setSelectedPartId(placed[0].id);
+          }
+          return [...prev, ...placed];
+        });
+      }
+      invalidateSlice();
     } catch (err) {
-      setParseError(err instanceof Error ? err.message : "Failed to parse STEP file.");
+      setLoadError(err instanceof Error ? err.message : "モデルの読み込みに失敗しました。");
     } finally {
-      setParsing(false);
+      setLoadingFiles(false);
     }
   }
+
+  function handlePartChange(id: string, patch: Partial<Pick<PlacedPart, "position" | "rotationDeg" | "scale">>) {
+    setParts((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    invalidateSlice();
+  }
+
+  function handleRemovePart(id: string) {
+    setParts((prev) => prev.filter((p) => p.id !== id));
+    setSelectedPartId((prev) => (prev === id ? null : prev));
+    invalidateSlice();
+  }
+
+  function handleDropToBed(id: string) {
+    setParts((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        const { min } = partWorldBounds(p);
+        return { ...p, position: [p.position[0], p.position[1], p.position[2] - min.z] };
+      })
+    );
+    invalidateSlice();
+  }
+
+  function handleClearAll() {
+    setParts([]);
+    setSelectedPartId(null);
+    invalidateSlice();
+  }
+
+  const stlBlob = useMemo(() => {
+    if (parts.length === 0) return null;
+    const soup = exportPlateTriangleSoup(parts);
+    return meshToBinaryStl(soup, null);
+  }, [parts]);
 
   async function handleSlice() {
     if (!stlBlob) return;
     setSlicing(true);
     setSliceError(null);
-    setGcode(null);
-    setStats(null);
-    setLayerPreview([]);
+    invalidateSlice();
     try {
       const form = new FormData();
-      form.append("file", stlBlob, "model.stl");
+      form.append("file", stlBlob, "plate.stl");
       form.append("settings", JSON.stringify(settings));
       const res = await fetch("/api/slice", { method: "POST", body: form });
       const data = await res.json();
@@ -138,7 +181,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = (fileName.replace(/\.(step|stp)$/i, "") || "model") + ".gcode";
+    a.download = "plate.gcode";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -148,13 +191,12 @@ export default function Home() {
     const url = URL.createObjectURL(stlBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = (fileName.replace(/\.(step|stp)$/i, "") || "model") + ".stl";
+    a.download = "plate.stl";
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  async function handleGetStatus() {
-    setStatusLoading(true);
+  async function fetchStatus() {
     setStatusError(null);
     try {
       const res = await fetch("/api/printer/status", {
@@ -168,10 +210,30 @@ export default function Home() {
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : "Failed to get status.");
       setPrinterStatus(null);
-    } finally {
-      setStatusLoading(false);
     }
   }
+
+  async function handleGetStatus() {
+    setStatusLoading(true);
+    await fetchStatus();
+    setStatusLoading(false);
+  }
+
+  // Auto-poll printer status while the print tab is open and a host is set.
+  const pollingRef = useRef(false);
+  useEffect(() => {
+    if (rightTab !== "print" || !autoRefresh || !printer.host) return;
+    if (!pollingRef.current) {
+      pollingRef.current = true;
+      void fetchStatus();
+    }
+    const id = setInterval(() => void fetchStatus(), STATUS_POLL_MS);
+    return () => {
+      clearInterval(id);
+      pollingRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rightTab, autoRefresh, printer.host, printer.serial, printer.accessCode]);
 
   async function handlePrintGcode() {
     if (!gcode) return;
@@ -182,7 +244,7 @@ export default function Home() {
       const res = await fetch("/api/printer/print-gcode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...printer, gcode, fileName: (fileName || "model") + ".gcode" }),
+        body: JSON.stringify({ ...printer, gcode, fileName: "plate.gcode" }),
       });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Failed to start print.");
@@ -238,17 +300,17 @@ export default function Home() {
     }
   }
 
-  const step = !meshes ? 1 : !stats ? 2 : 3;
+  const step = parts.length === 0 ? 1 : !stats ? 2 : 3;
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <header className="flex flex-none flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-6 py-3">
         <div>
           <h1 className="text-lg font-semibold leading-tight">Bambu Web Tools</h1>
-          <p className="text-xs text-zinc-500">STEP表示・スライス・Bambuプリンター印刷</p>
+          <p className="text-xs text-zinc-500">モデル表示・スライス・Bambuプリンター印刷</p>
         </div>
         <ol className="flex items-center gap-2 text-xs text-zinc-400">
-          <StepBadge n={1} label="アップロード" active={step === 1} done={step > 1} />
+          <StepBadge n={1} label="モデル配置" active={step === 1} done={step > 1} />
           <StepArrow />
           <StepBadge n={2} label="スライス" active={step === 2} done={step > 2} />
           <StepArrow />
@@ -257,35 +319,47 @@ export default function Home() {
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-        {/* Left: upload + viewer, fills available height */}
+        {/* Left: upload + viewer + part list */}
         <section className="flex min-h-0 flex-col gap-3 overflow-hidden">
           <Card className="flex-none">
-            <label className="mb-1 block text-sm font-medium text-zinc-300">
-              1. STEPファイルを選択 (.step / .stp)
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="mb-1 block text-sm font-medium text-zinc-300">
+                1. モデルを追加 (.step/.stp/.stl/.obj/.3mf, 複数選択可)
+              </label>
+              {parts.length > 0 && (
+                <button onClick={handleClearAll} className="text-xs text-zinc-500 hover:text-red-400">
+                  すべて削除
+                </button>
+              )}
+            </div>
             <input
               type="file"
-              accept=".step,.stp"
+              multiple
+              accept=".step,.stp,.stl,.obj,.3mf"
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void handleFile(f);
+                if (e.target.files && e.target.files.length > 0) void handleFiles(e.target.files);
+                e.target.value = "";
               }}
               className="block w-full text-sm text-zinc-300 file:mr-3 file:rounded file:border-0 file:bg-blue-600 file:px-3 file:py-1.5 file:text-white hover:file:bg-blue-500"
             />
-            {parsing && <p className="mt-2 text-sm text-amber-400">STEPファイルを解析中...</p>}
-            {parseError && <p className="mt-2 text-sm text-red-400">{parseError}</p>}
-            {meshes && !parsing && (
-              <p className="mt-2 truncate text-sm text-emerald-400">
-                {fileName}: {meshes.length} パーツを読み込みました
-              </p>
+            {loadingFiles && <p className="mt-2 text-sm text-amber-400">読み込み中...</p>}
+            {loadError && <p className="mt-2 text-sm text-red-400">{loadError}</p>}
+            {parts.length > 0 && !loadingFiles && (
+              <p className="mt-2 text-sm text-emerald-400">{parts.length} パーツをプレート上に配置しました</p>
             )}
           </Card>
 
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
-            <ModelViewer meshes={meshes} />
-            {!meshes && !parsing && (
+          <div className="relative min-h-0 flex-[2] overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
+            <ModelViewer
+              parts={parts}
+              selectedId={selectedPartId}
+              onSelect={setSelectedPartId}
+              bedSizeXMm={settings.bedSizeXMm}
+              bedSizeYMm={settings.bedSizeYMm}
+            />
+            {parts.length === 0 && !loadingFiles && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-600">
-                STEPファイルをアップロードするとここに3Dモデルが表示されます
+                モデルをアップロードするとここに3Dプレートが表示されます
               </div>
             )}
             {stlBlob && (
@@ -293,10 +367,24 @@ export default function Home() {
                 onClick={downloadStl}
                 className="absolute bottom-3 right-3 rounded border border-zinc-700 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur hover:bg-zinc-800"
               >
-                STLをダウンロード
+                プレートSTLをダウンロード
               </button>
             )}
           </div>
+
+          {parts.length > 0 && (
+            <Card className="max-h-[35%] flex-none overflow-y-auto">
+              <h2 className="mb-2 text-sm font-semibold text-zinc-200">パーツ一覧・配置調整</h2>
+              <PartList
+                parts={parts}
+                selectedId={selectedPartId}
+                onSelect={setSelectedPartId}
+                onChange={handlePartChange}
+                onRemove={handleRemovePart}
+                onDropToBed={handleDropToBed}
+              />
+            </Card>
+          )}
         </section>
 
         {/* Right: tabbed slice / print panels */}
@@ -333,6 +421,30 @@ export default function Home() {
                     <NumberField label="押出幅 (mm)" value={settings.extrusionWidthMm} step={0.02}
                       onChange={(v) => setSettings((s) => ({ ...s, extrusionWidthMm: v }))} />
                   </div>
+
+                  <div className="mt-4 border-t border-zinc-800 pt-3">
+                    <label className="flex items-center gap-2 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={settings.supportEnabled}
+                        onChange={(e) => setSettings((s) => ({ ...s, supportEnabled: e.target.checked }))}
+                      />
+                      サポート材を自動生成する(ビルドプレート接地のみ)
+                    </label>
+                    {settings.supportEnabled && (
+                      <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
+                        <NumberField label="オーバーハング角度 (°)" value={settings.supportOverhangAngleDeg} step={5} min={0} max={89}
+                          onChange={(v) => setSettings((s) => ({ ...s, supportOverhangAngleDeg: v }))} />
+                        <NumberField label="サポート間隔 (mm)" value={settings.supportSpacingMm} step={0.5} min={1}
+                          onChange={(v) => setSettings((s) => ({ ...s, supportSpacingMm: v }))} />
+                        <NumberField label="サポート柱サイズ (mm)" value={settings.supportPillarSizeMm} step={0.1} min={0.4}
+                          onChange={(v) => setSettings((s) => ({ ...s, supportPillarSizeMm: v }))} />
+                        <NumberField label="頂部クリアランス (mm)" value={settings.supportTopGapMm} step={0.05} min={0}
+                          onChange={(v) => setSettings((s) => ({ ...s, supportTopGapMm: v }))} />
+                      </div>
+                    )}
+                  </div>
+
                   <button
                     disabled={!stlBlob || slicing}
                     onClick={handleSlice}
@@ -344,6 +456,7 @@ export default function Home() {
                   <p className="mt-3 text-xs leading-relaxed text-zinc-500">
                     ※ 内蔵スライサーは単色・AMS非対応の簡易実装です。フル機能(AMS/フロー校正/専用開始Gコード)が必要な場合は、
                     Bambu Studio/OrcaSlicerで書き出した「.gcode.3mf」を「③ プリンターへ送信」タブから送信してください。
+                    サポートは「ビルドプレート接地のみ」モードのみ対応しています。
                   </p>
                 </Card>
 
@@ -399,6 +512,10 @@ export default function Home() {
                     >
                       {statusLoading ? "確認中..." : "ステータス取得"}
                     </button>
+                    <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                      <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+                      自動更新 (5秒ごと)
+                    </label>
                     <button onClick={() => handleControl("pause")} disabled={printBusy} className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800 disabled:opacity-50">一時停止</button>
                     <button onClick={() => handleControl("resume")} disabled={printBusy} className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800 disabled:opacity-50">再開</button>
                     <button onClick={() => handleControl("stop")} disabled={printBusy} className="rounded border border-red-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950 disabled:opacity-50">停止</button>

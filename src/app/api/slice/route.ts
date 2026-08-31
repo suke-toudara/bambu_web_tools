@@ -63,6 +63,7 @@ export async function POST(req: NextRequest) {
       layerPreview: result.layers.map((l) => ({
         z: l.z,
         perimeters: l.perimeters,
+        supports: l.supports,
       })),
     });
   } catch (err) {
