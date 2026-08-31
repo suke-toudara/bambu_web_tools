@@ -14,6 +14,8 @@ export default function ModelViewer({
   bedSizeXMm,
   bedSizeYMm,
   overlappingIds,
+  pickFaceMode,
+  onFacePicked,
 }: {
   parts: PlacedPart[];
   selectedId: string | null;
@@ -21,18 +23,26 @@ export default function ModelViewer({
   bedSizeXMm: number;
   bedSizeYMm: number;
   overlappingIds?: Set<string>;
+  /** While true, clicking a face on any part reports it via onFacePicked
+   * instead of just selecting the part ("place on face" mode). */
+  pickFaceMode?: boolean;
+  onFacePicked?: (partId: string, worldNormal: [number, number, number]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const partsRef = useRef(parts);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
   const overlappingRef = useRef(overlappingIds);
+  const pickFaceModeRef = useRef(pickFaceMode);
+  const onFacePickedRef = useRef(onFacePicked);
 
   useEffect(() => {
     partsRef.current = parts;
     selectedRef.current = selectedId;
     onSelectRef.current = onSelect;
     overlappingRef.current = overlappingIds;
+    pickFaceModeRef.current = pickFaceMode;
+    onFacePickedRef.current = onFacePicked;
   });
 
   // Scene/camera/renderer are recreated only when the container mounts or
@@ -205,12 +215,22 @@ export default function ModelViewer({
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(partsGroup.children, true);
       if (hits.length === 0) {
-        onSelectRef.current(null);
+        if (!pickFaceModeRef.current) onSelectRef.current(null);
         return;
       }
-      let obj: THREE.Object3D | null = hits[0].object;
+      const hit = hits[0];
+      let obj: THREE.Object3D | null = hit.object;
       while (obj && !obj.userData.partId) obj = obj.parent;
-      onSelectRef.current(obj ? (obj.userData.partId as string) : null);
+      const partId = obj ? (obj.userData.partId as string) : null;
+
+      if (pickFaceModeRef.current && partId && hit.face) {
+        const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+        const worldNormal = hit.face.normal.clone().applyMatrix3(normalMatrix).normalize();
+        onFacePickedRef.current?.(partId, [worldNormal.x, worldNormal.y, worldNormal.z]);
+        return;
+      }
+
+      onSelectRef.current(partId);
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
@@ -234,11 +254,16 @@ export default function ModelViewer({
     };
     animate();
 
-    // Expose imperative update hooks used by the effects below.
-    (container as unknown as { __viewer?: { rebuildParts: () => void; updateHighlight: () => void } }).__viewer = {
-      rebuildParts,
-      updateHighlight,
+    const setCursor = (mode: boolean) => {
+      renderer.domElement.style.cursor = mode ? "crosshair" : "";
     };
+
+    // Expose imperative update hooks used by the effects below.
+    (
+      container as unknown as {
+        __viewer?: { rebuildParts: () => void; updateHighlight: () => void; setCursor: (mode: boolean) => void };
+      }
+    ).__viewer = { rebuildParts, updateHighlight, setCursor };
 
     return () => {
       cancelAnimationFrame(frameId);
@@ -259,21 +284,28 @@ export default function ModelViewer({
     };
   }, [bedSizeXMm, bedSizeYMm]);
 
+  type ViewerHandle = {
+    rebuildParts: () => void;
+    updateHighlight: () => void;
+    setCursor: (mode: boolean) => void;
+  };
+
   // Re-sync geometry/transforms whenever parts change, without recreating
   // the renderer/camera (keeps the current camera angle stable).
   useEffect(() => {
-    const container = containerRef.current as unknown as {
-      __viewer?: { rebuildParts: () => void; updateHighlight: () => void };
-    } | null;
+    const container = containerRef.current as unknown as { __viewer?: ViewerHandle } | null;
     container?.__viewer?.rebuildParts();
   }, [parts]);
 
   useEffect(() => {
-    const container = containerRef.current as unknown as {
-      __viewer?: { rebuildParts: () => void; updateHighlight: () => void };
-    } | null;
+    const container = containerRef.current as unknown as { __viewer?: ViewerHandle } | null;
     container?.__viewer?.updateHighlight();
   }, [selectedId, overlappingIds]);
+
+  useEffect(() => {
+    const container = containerRef.current as unknown as { __viewer?: ViewerHandle } | null;
+    container?.__viewer?.setCursor(!!pickFaceMode);
+  }, [pickFaceMode]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

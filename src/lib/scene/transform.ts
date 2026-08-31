@@ -36,6 +36,45 @@ export function applyPartTransform(position: Float32Array, part: PlacedPart): Fl
   return out;
 }
 
+/**
+ * Returns a copy of `part` rotated so the given world-space face normal
+ * (as picked by clicking a face in the viewer) points straight down,
+ * i.e. that face becomes flush with the build plate — a "place on face"
+ * operation common to CAD/slicer tools. The part is also re-seated so its
+ * lowest point sits at z=0 afterward, since reorienting around the part's
+ * own pivot will generally lift or sink it relative to the plate.
+ */
+export function placePartOnFaceDown(part: PlacedPart, worldNormal: [number, number, number]): PlacedPart {
+  const currentEuler = new THREE.Euler(
+    part.rotationDeg[0] * DEG2RAD,
+    part.rotationDeg[1] * DEG2RAD,
+    part.rotationDeg[2] * DEG2RAD,
+    "XYZ"
+  );
+  const currentQuat = new THREE.Quaternion().setFromEuler(currentEuler);
+
+  const normal = new THREE.Vector3(...worldNormal).normalize();
+  const down = new THREE.Vector3(0, 0, -1);
+  const deltaQuat = new THREE.Quaternion().setFromUnitVectors(normal, down);
+  const newQuat = deltaQuat.multiply(currentQuat);
+
+  const newEuler = new THREE.Euler().setFromQuaternion(newQuat, "XYZ");
+  const rotated: PlacedPart = {
+    ...part,
+    rotationDeg: [
+      THREE.MathUtils.radToDeg(newEuler.x),
+      THREE.MathUtils.radToDeg(newEuler.y),
+      THREE.MathUtils.radToDeg(newEuler.z),
+    ],
+  };
+
+  const { min } = partWorldBounds(rotated);
+  return {
+    ...rotated,
+    position: [rotated.position[0], rotated.position[1], rotated.position[2] - min.z],
+  };
+}
+
 /** World-space bounding box of a part after its transform is applied. */
 export function partWorldBounds(part: PlacedPart): { min: THREE.Vector3; max: THREE.Vector3 } {
   const m = partMatrix(part);

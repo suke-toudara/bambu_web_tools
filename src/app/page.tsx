@@ -6,7 +6,7 @@ import { loadModelFile } from "@/lib/loaders/loadModelFile";
 import { autoPlaceBatch } from "@/lib/scene/autoPlace";
 import { exportPlateTriangleSoup } from "@/lib/scene/exportPlate";
 import { findOverlappingPartIds } from "@/lib/scene/overlap";
-import { partWorldBounds } from "@/lib/scene/transform";
+import { partWorldBounds, placePartOnFaceDown } from "@/lib/scene/transform";
 import type { PlacedPart } from "@/lib/scene/types";
 import { meshToBinaryStl } from "@/lib/stl/exportBinaryStl";
 import { DEFAULT_SLICE_SETTINGS, type SliceSettings } from "@/lib/slicer/types";
@@ -95,6 +95,7 @@ function loadActivePrinterId(): string | null {
 export default function Home() {
   const [parts, setParts] = useState<PlacedPart[]>([]);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const [pickFaceMode, setPickFaceMode] = useState(false);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -227,6 +228,13 @@ export default function Home() {
   function handleClearAll() {
     setParts([]);
     setSelectedPartId(null);
+    invalidateSlice();
+  }
+
+  function handleFacePicked(id: string, worldNormal: [number, number, number]) {
+    setParts((prev) => prev.map((p) => (p.id === id ? placePartOnFaceDown(p, worldNormal) : p)));
+    setSelectedPartId(id);
+    setPickFaceMode(false);
     invalidateSlice();
   }
 
@@ -442,11 +450,25 @@ export default function Home() {
               bedSizeXMm={settings.bedSizeXMm}
               bedSizeYMm={settings.bedSizeYMm}
               overlappingIds={overlappingIds}
+              pickFaceMode={pickFaceMode}
+              onFacePicked={handleFacePicked}
             />
             {parts.length === 0 && !loadingFiles && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-600">
                 モデルをアップロードするとここに3Dプレートが表示されます
               </div>
+            )}
+            {parts.length > 0 && (
+              <button
+                onClick={() => setPickFaceMode((v) => !v)}
+                className={`absolute left-3 top-3 rounded border px-3 py-1.5 text-xs backdrop-blur ${
+                  pickFaceMode
+                    ? "border-blue-500 bg-blue-600/80 text-white"
+                    : "border-zinc-700 bg-zinc-900/90 text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                {pickFaceMode ? "面をクリックしてください (キャンセル)" : "面を選んで設置"}
+              </button>
             )}
             {stlBlob && (
               <button
