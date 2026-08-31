@@ -12,6 +12,7 @@ import { meshToBinaryStl } from "@/lib/stl/exportBinaryStl";
 import { DEFAULT_SLICE_SETTINGS, type SliceSettings } from "@/lib/slicer/types";
 import type { LayerPreviewData } from "@/components/LayerPreview";
 import PartList from "@/components/PartList";
+import PrinterProfiles, { type SavedPrinter } from "@/components/PrinterProfiles";
 
 const ModelViewer = dynamic(() => import("@/components/ModelViewer"), { ssr: false });
 const LayerPreview = dynamic(() => import("@/components/LayerPreview"), { ssr: false });
@@ -32,6 +33,9 @@ interface PrinterConn {
 }
 
 const STORAGE_KEY = "bambu-web-tools:printer";
+const PRINTERS_STORAGE_KEY = "bambu-web-tools:printers";
+const ACTIVE_PRINTER_STORAGE_KEY = "bambu-web-tools:activePrinterId";
+const MIGRATED_PRINTER_ID = "printer-migrated-1";
 const STATUS_POLL_MS = 5000;
 
 function formatDuration(sec: number): string {
@@ -39,6 +43,53 @@ function formatDuration(sec: number): string {
   const m = Math.round((sec % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+// Read localStorage directly in useState lazy initializers (rather than an
+// effect that calls setState after mount) so the very first render already
+// has the persisted value. Effect-based hydration raced with React 18
+// Strict Mode's double-invoked mount effects: the "write current state"
+// effect would run with the still-default value between the two hydration
+// passes and permanently clobber a real saved connection on reload.
+function loadPrinterConn(): PrinterConn {
+  if (typeof window === "undefined") return { host: "", serial: "", accessCode: "" };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // ignore
+  }
+  return { host: "", serial: "", accessCode: "" };
+}
+
+function loadSavedPrinters(): SavedPrinter[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(PRINTERS_STORAGE_KEY);
+    const list: SavedPrinter[] = raw ? JSON.parse(raw) : [];
+    if (list.length > 0) return list;
+  } catch {
+    // ignore
+  }
+  // Migrate a pre-existing single-printer connection (from before named
+  // profiles existed) into a named entry, so upgrading doesn't lose it.
+  const conn = loadPrinterConn();
+  if (conn.host) return [{ id: MIGRATED_PRINTER_ID, name: "プリンター1", ...conn }];
+  return [];
+}
+
+function loadActivePrinterId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(PRINTERS_STORAGE_KEY);
+    if (raw && JSON.parse(raw).length > 0) {
+      return localStorage.getItem(ACTIVE_PRINTER_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+  // No saved list yet: mirror loadSavedPrinters()'s migration decision.
+  return loadPrinterConn().host ? MIGRATED_PRINTER_ID : null;
 }
 
 export default function Home() {
@@ -54,7 +105,9 @@ export default function Home() {
   const [stats, setStats] = useState<SliceStats | null>(null);
   const [layerPreview, setLayerPreview] = useState<LayerPreviewData[]>([]);
 
-  const [printer, setPrinter] = useState<PrinterConn>({ host: "", serial: "", accessCode: "" });
+  const [printer, setPrinter] = useState<PrinterConn>(loadPrinterConn);
+  const [savedPrinters, setSavedPrinters] = useState<SavedPrinter[]>(loadSavedPrinters);
+  const [activePrinterId, setActivePrinterId] = useState<string | null>(loadActivePrinterId);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -72,23 +125,52 @@ export default function Home() {
   const [printMode, setPrintMode] = useState<"gcode" | "project">("gcode");
 
   useEffect(() => {
-    // One-time hydration of persisted printer settings from localStorage.
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (raw) setPrinter(JSON.parse(raw));
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(printer));
     } catch {
       // ignore
     }
   }, [printer]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PRINTERS_STORAGE_KEY, JSON.stringify(savedPrinters));
+    } catch {
+      // ignore
+    }
+  }, [savedPrinters]);
+
+  useEffect(() => {
+    try {
+      if (activePrinterId) localStorage.setItem(ACTIVE_PRINTER_STORAGE_KEY, activePrinterId);
+      else localStorage.removeItem(ACTIVE_PRINTER_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, [activePrinterId]);
+
+  function handleSelectSavedPrinter(p: SavedPrinter) {
+    setPrinter({ host: p.host, serial: p.serial, accessCode: p.accessCode });
+    setActivePrinterId(p.id);
+    setPrinterStatus(null);
+    setStatusError(null);
+  }
+
+  function handleSaveNewPrinter(name: string) {
+    const entry: SavedPrinter = { id: `printer-${Date.now()}`, name, ...printer };
+    setSavedPrinters((prev) => [...prev, entry]);
+    setActivePrinterId(entry.id);
+  }
+
+  function handleUpdateActivePrinter() {
+    if (!activePrinterId) return;
+    setSavedPrinters((prev) => prev.map((p) => (p.id === activePrinterId ? { ...p, ...printer } : p)));
+  }
+
+  function handleRemoveSavedPrinter(id: string) {
+    setSavedPrinters((prev) => prev.filter((p) => p.id !== id));
+    setActivePrinterId((prev) => (prev === id ? null : prev));
+  }
 
   function invalidateSlice() {
     setGcode(null);
@@ -509,6 +591,14 @@ export default function Home() {
               <div className="flex flex-col gap-4">
                 <Card>
                   <h2 className="mb-3 text-sm font-semibold text-zinc-200">プリンター接続 (Bambu Lab / LAN モード)</h2>
+                  <PrinterProfiles
+                    printers={savedPrinters}
+                    activeId={activePrinterId}
+                    onSelect={handleSelectSavedPrinter}
+                    onSaveNew={handleSaveNewPrinter}
+                    onUpdateActive={handleUpdateActivePrinter}
+                    onRemove={handleRemoveSavedPrinter}
+                  />
                   <div className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
                     <TextField label="IPアドレス" value={printer.host} onChange={(v) => setPrinter((p) => ({ ...p, host: v }))} placeholder="192.168.1.50" />
                     <TextField label="シリアル番号" value={printer.serial} onChange={(v) => setPrinter((p) => ({ ...p, serial: v }))} placeholder="01P00A000000000" />
