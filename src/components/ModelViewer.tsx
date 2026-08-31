@@ -13,22 +13,26 @@ export default function ModelViewer({
   onSelect,
   bedSizeXMm,
   bedSizeYMm,
+  overlappingIds,
 }: {
   parts: PlacedPart[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   bedSizeXMm: number;
   bedSizeYMm: number;
+  overlappingIds?: Set<string>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const partsRef = useRef(parts);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
+  const overlappingRef = useRef(overlappingIds);
 
   useEffect(() => {
     partsRef.current = parts;
     selectedRef.current = selectedId;
     onSelectRef.current = onSelect;
+    overlappingRef.current = overlappingIds;
   });
 
   // Scene/camera/renderer are recreated only when the container mounts or
@@ -81,7 +85,16 @@ export default function ModelViewer({
 
     const partsGroup = new THREE.Group();
     scene.add(partsGroup);
-    let highlightBox: THREE.BoxHelper | null = null;
+    let highlightBoxes: THREE.BoxHelper[] = [];
+
+    const clearHighlights = () => {
+      for (const box of highlightBoxes) {
+        scene.remove(box);
+        box.geometry.dispose();
+        (box.material as THREE.Material).dispose();
+      }
+      highlightBoxes = [];
+    };
 
     const rebuildParts = () => {
       while (partsGroup.children.length > 0) {
@@ -95,10 +108,7 @@ export default function ModelViewer({
           }
         });
       }
-      if (highlightBox) {
-        scene.remove(highlightBox);
-        highlightBox = null;
-      }
+      clearHighlights();
 
       partsRef.current.forEach((part, partIndex) => {
         const group = new THREE.Group();
@@ -137,14 +147,25 @@ export default function ModelViewer({
     };
 
     const updateHighlight = () => {
-      if (highlightBox) {
-        scene.remove(highlightBox);
-        highlightBox = null;
-      }
-      const selected = partsGroup.children.find((c) => c.userData.partId === selectedRef.current);
-      if (selected) {
-        highlightBox = new THREE.BoxHelper(selected, 0xffee55);
-        scene.add(highlightBox);
+      clearHighlights();
+      const overlapping = overlappingRef.current;
+
+      for (const child of partsGroup.children) {
+        const id = child.userData.partId as string | undefined;
+        if (!id) continue;
+        const isOverlapping = overlapping?.has(id) ?? false;
+        const isSelected = id === selectedRef.current;
+        // Overlap warnings take visual priority over the selection outline
+        // so a selected, overlapping part still reads as "needs attention".
+        if (isOverlapping) {
+          const box = new THREE.BoxHelper(child, 0xff5555);
+          scene.add(box);
+          highlightBoxes.push(box);
+        } else if (isSelected) {
+          const box = new THREE.BoxHelper(child, 0xffee55);
+          scene.add(box);
+          highlightBoxes.push(box);
+        }
       }
     };
 
@@ -227,6 +248,7 @@ export default function ModelViewer({
       controls.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
+      clearHighlights();
       partsGroup.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
         if (mesh.isMesh) {
@@ -251,7 +273,7 @@ export default function ModelViewer({
       __viewer?: { rebuildParts: () => void; updateHighlight: () => void };
     } | null;
     container?.__viewer?.updateHighlight();
-  }, [selectedId]);
+  }, [selectedId, overlappingIds]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

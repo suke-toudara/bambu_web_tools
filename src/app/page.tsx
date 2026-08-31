@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { loadModelFile } from "@/lib/loaders/loadModelFile";
 import { autoPlaceBatch } from "@/lib/scene/autoPlace";
 import { exportPlateTriangleSoup } from "@/lib/scene/exportPlate";
+import { findOverlappingPartIds } from "@/lib/scene/overlap";
 import { partWorldBounds } from "@/lib/scene/transform";
 import type { PlacedPart } from "@/lib/scene/types";
 import { meshToBinaryStl } from "@/lib/stl/exportBinaryStl";
@@ -152,6 +153,8 @@ export default function Home() {
     const soup = exportPlateTriangleSoup(parts);
     return meshToBinaryStl(soup, null);
   }, [parts]);
+
+  const overlappingIds = useMemo(() => findOverlappingPartIds(parts), [parts]);
 
   async function handleSlice() {
     if (!stlBlob) return;
@@ -356,6 +359,7 @@ export default function Home() {
               onSelect={setSelectedPartId}
               bedSizeXMm={settings.bedSizeXMm}
               bedSizeYMm={settings.bedSizeYMm}
+              overlappingIds={overlappingIds}
             />
             {parts.length === 0 && !loadingFiles && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-600">
@@ -382,6 +386,7 @@ export default function Home() {
                 onChange={handlePartChange}
                 onRemove={handleRemovePart}
                 onDropToBed={handleDropToBed}
+                overlappingIds={overlappingIds}
               />
             </Card>
           )}
@@ -445,6 +450,11 @@ export default function Home() {
                     )}
                   </div>
 
+                  {overlappingIds.size > 0 && (
+                    <p className="mt-3 rounded border border-red-800 bg-red-950/40 px-2 py-1.5 text-xs text-red-300">
+                      ⚠️ 左のプレートで {overlappingIds.size} パーツが重なっています。このままスライスすると重なった部分が二重に印刷されます。
+                    </p>
+                  )}
                   <button
                     disabled={!stlBlob || slicing}
                     onClick={handleSlice}

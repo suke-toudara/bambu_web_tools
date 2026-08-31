@@ -9,6 +9,7 @@ export default function PartList({
   onChange,
   onRemove,
   onDropToBed,
+  overlappingIds,
 }: {
   parts: PlacedPart[];
   selectedId: string | null;
@@ -16,37 +17,53 @@ export default function PartList({
   onChange: (id: string, patch: Partial<Pick<PlacedPart, "position" | "rotationDeg" | "scale">>) => void;
   onRemove: (id: string) => void;
   onDropToBed: (id: string) => void;
+  overlappingIds?: Set<string>;
 }) {
   if (parts.length === 0) return null;
   const selected = parts.find((p) => p.id === selectedId) ?? null;
 
   return (
     <div className="flex flex-col gap-2">
+      {overlappingIds && overlappingIds.size > 0 && (
+        <div className="rounded border border-red-800 bg-red-950/40 px-2 py-1.5 text-xs text-red-300">
+          ⚠️ {overlappingIds.size} パーツが重なっています。位置または回転を調整してください。
+        </div>
+      )}
       <ul className="flex flex-col gap-1">
-        {parts.map((part) => (
-          <li key={part.id}>
-            <button
-              onClick={() => onSelect(part.id === selectedId ? null : part.id)}
-              className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm ${
-                part.id === selectedId ? "bg-blue-600/20 text-blue-200" : "text-zinc-300 hover:bg-zinc-800"
-              }`}
-            >
-              <span className="truncate">{part.name}</span>
-              <span
-                role="button"
-                tabIndex={0}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemove(part.id);
-                }}
-                className="ml-2 shrink-0 text-zinc-500 hover:text-red-400"
-                title="削除"
+        {parts.map((part) => {
+          const isOverlapping = overlappingIds?.has(part.id) ?? false;
+          return (
+            <li key={part.id}>
+              <button
+                onClick={() => onSelect(part.id === selectedId ? null : part.id)}
+                className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm ${
+                  isOverlapping
+                    ? "bg-red-950/50 text-red-200 ring-1 ring-inset ring-red-800"
+                    : part.id === selectedId
+                      ? "bg-blue-600/20 text-blue-200"
+                      : "text-zinc-300 hover:bg-zinc-800"
+                }`}
               >
-                ✕
-              </span>
-            </button>
-          </li>
-        ))}
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {isOverlapping && <span title="他のパーツと重なっています">⚠️</span>}
+                  <span className="truncate">{part.name}</span>
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemove(part.id);
+                  }}
+                  className="ml-2 shrink-0 text-zinc-500 hover:text-red-400"
+                  title="削除"
+                >
+                  ✕
+                </span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
 
       {selected && (
