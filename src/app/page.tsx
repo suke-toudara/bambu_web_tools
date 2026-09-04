@@ -450,6 +450,7 @@ export default function Home() {
               overlappingIds={overlappingIds}
               pickFaceMode={pickFaceMode}
               onFacePicked={handleFacePicked}
+              onPositionChange={(id, position) => handlePartChange(id, { position })}
             />
             {parts.length === 0 && !loadingFiles && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-zinc-600">
@@ -467,6 +468,11 @@ export default function Home() {
               >
                 {pickFaceMode ? "面をクリックしてください (キャンセル)" : "面を選んで設置"}
               </button>
+            )}
+            {parts.length > 0 && !pickFaceMode && (
+              <div className="pointer-events-none absolute bottom-3 left-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-500 backdrop-blur">
+                パーツをドラッグしてプレート上の位置をずらせます
+              </div>
             )}
             {stlBlob && (
               <button
