@@ -112,26 +112,50 @@ export async function getStatus(conn: BambuConnection): Promise<BambuStatus> {
   return parseStatus(merged);
 }
 
+/** Waits for `promise`, but gives up (resolves anyway) if it's still
+ * pending after `ms` — for a step that's merely "nice to wait for" (a QoS 1
+ * PUBACK, a graceful disconnect) so it can't hang the whole request forever
+ * if the printer's broker never gets around to it. A genuine rejection
+ * reaching us before the timeout still propagates; one arriving after we've
+ * already given up is swallowed (nothing is awaiting it any more). */
+async function orGiveUpAfter(promise: Promise<void>, ms: number): Promise<void> {
+  let timer!: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  try {
+    await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+  promise.catch(() => {});
+}
+
 /** Publishes a raw `{"print": {...}}` command to the printer's request topic
  * and waits for the printer to start acting on it before disconnecting.
  *
  * Two details matter here, both learned the hard way by other LAN-mode
  * clients (see bambuddy's bambu_mqtt.py):
- *  - QoS must be 1, not the default 0. The printer can silently ignore a
- *    QoS 0 publish while it's busy broadcasting its own status updates.
+ *  - QoS should be 1, not the default 0 — the printer can silently ignore a
+ *    QoS 0 publish while it's busy broadcasting its own status updates. But
+ *    the printer's broker isn't guaranteed to PUBACK promptly (or at all),
+ *    so waiting for it is bounded (`orGiveUpAfter`) rather than potentially
+ *    hanging the request forever. A transport-level publish error (as
+ *    opposed to no PUBACK) still surfaces immediately.
  *  - The socket must not be force-closed right after publishing. A print
  *    command (especially `gcode_file`/`project_file`) has the printer
  *    parsing the referenced file; yanking the connection while that's
  *    still in flight has been observed to itself produce the printer-side
  *    "0500-4003 unable to parse print file" error, unrelated to the file's
- *    own validity. Wait, then close gracefully (not `end(true)`). */
+ *    own validity. Wait, then close gracefully (not `end(true)`) — again
+ *    bounded, so a slow/unresponsive graceful close can't hang forever. */
 export async function publishPrintCommand(
   conn: BambuConnection,
   command: Record<string, unknown>
 ): Promise<void> {
   const client = await connectClient(conn);
   try {
-    await new Promise<void>((resolve, reject) => {
+    const published = new Promise<void>((resolve, reject) => {
       client.publish(
         `device/${conn.serial}/request`,
         JSON.stringify({ print: { sequence_id: "0", ...command } }),
@@ -139,8 +163,9 @@ export async function publishPrintCommand(
         (err) => (err ? reject(err) : resolve())
       );
     });
+    await orGiveUpAfter(published, 5000);
     await new Promise((r) => setTimeout(r, 3000));
   } finally {
-    await new Promise<void>((resolve) => client.end(false, {}, () => resolve()));
+    await orGiveUpAfter(new Promise<void>((resolve) => client.end(false, {}, () => resolve())), 5000);
   }
 }
