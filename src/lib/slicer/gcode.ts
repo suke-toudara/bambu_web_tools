@@ -10,6 +10,59 @@ class GcodeWriter {
   }
 }
 
+function formatDuration(sec: number): string {
+  const total = Math.max(0, Math.round(sec));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+}
+
+/** Bambu Lab firmware validates that an uploaded .gcode file has the
+ * HEADER_BLOCK / CONFIG_BLOCK / EXECUTABLE_BLOCK structure that Bambu
+ * Studio/OrcaSlicer emit before it will accept a `gcode_file` MQTT command
+ * ("MQTTコマンドの検証に失敗しました" on the printer screen otherwise); a
+ * plain Marlin-style file without these markers is rejected outright. This
+ * writes best-effort header/config blocks (reverse-engineered from
+ * community documentation, not an official spec) around the actual moves so
+ * the file matches the shape the firmware expects. */
+function writeHeaderBlock(w: GcodeWriter, result: SliceResult, settings: SliceSettings): void {
+  const filamentArea = Math.PI * (settings.filamentDiameterMm / 2) ** 2;
+  const filamentVolumeCm3 = (result.estimatedFilamentMm * filamentArea) / 1000;
+  const maxZ = result.boundsMax.z - result.boundsMin.z;
+
+  w.push("; HEADER_BLOCK_START");
+  w.push("; BambuStudio 01.09.00.63");
+  w.push(`; model printing time: ${formatDuration(result.estimatedTimeSec)}`);
+  w.push(`; total estimated time: ${formatDuration(result.estimatedTimeSec)}`);
+  w.push(`; total layer number: ${result.layerCount}`);
+  w.push(`; total filament length [mm] : ${result.estimatedFilamentMm.toFixed(2)}`);
+  w.push(`; total filament volume [cm^3] : ${filamentVolumeCm3.toFixed(2)}`);
+  w.push(`; total filament weight [g] : ${result.estimatedFilamentGrams.toFixed(2)}`);
+  w.push(`; filament_diameter : ${settings.filamentDiameterMm}`);
+  w.push(`; max_z_height : ${maxZ.toFixed(2)}`);
+  w.push("; HEADER_BLOCK_END");
+  w.push(";");
+  w.push("; CONFIG_BLOCK_START");
+  w.push(`; nozzle_diameter = ${settings.nozzleDiameterMm}`);
+  w.push(`; layer_height = ${settings.layerHeightMm}`);
+  w.push(`; initial_layer_height = ${settings.firstLayerHeightMm}`);
+  w.push(`; line_width = ${settings.extrusionWidthMm}`);
+  w.push(`; wall_loops = ${settings.wallLoops}`);
+  w.push(`; sparse_infill_density = ${settings.infillDensityPct}%`);
+  w.push(`; outer_wall_speed = ${settings.printSpeedMmS}`);
+  w.push(`; initial_layer_speed = ${settings.firstLayerSpeedMmS}`);
+  w.push(`; travel_speed = ${settings.travelSpeedMmS}`);
+  w.push(`; nozzle_temperature = ${settings.nozzleTempC}`);
+  w.push(`; nozzle_temperature_initial_layer = ${settings.firstLayerNozzleTempC}`);
+  w.push(`; bed_temperature = ${settings.bedTempC}`);
+  w.push(`; hot_plate_temp = ${settings.bedTempC}`);
+  w.push(`; fan_max_speed = ${settings.fanSpeedPct}`);
+  w.push(`; filament_type = PLA`);
+  w.push("; CONFIG_BLOCK_END");
+  w.push(";");
+}
+
 /** Generates plain FDM gcode (Marlin/Klipper dialect, works as a generic
  * single-filament "gcode_file" style print on Bambu P1/A1/X1 series, and on
  * OctoPrint/Klipper/Prusa hosts). This is a simplified hobbyist-level
@@ -19,6 +72,8 @@ class GcodeWriter {
  * and use the "Upload pre-sliced .gcode.3mf" path instead. */
 export function generateGcode(result: SliceResult, settings: SliceSettings): string {
   const w = new GcodeWriter();
+  writeHeaderBlock(w, result, settings);
+  w.push("; EXECUTABLE_BLOCK_START");
 
   const centerX = settings.bedSizeXMm / 2;
   const centerY = settings.bedSizeYMm / 2;
@@ -152,6 +207,7 @@ export function generateGcode(result: SliceResult, settings: SliceSettings): str
   w.push(`G90`);
   w.push(`G1 X${centerX.toFixed(1)} Y${settings.bedSizeYMm.toFixed(1)} F6000`);
   w.push(`M84 ; disable motors`);
+  w.push("; EXECUTABLE_BLOCK_END");
 
   return w.toString();
 }
