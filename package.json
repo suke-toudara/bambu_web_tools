@@ -1,0 +1,33 @@
+{
+  "name": "bambu_web_tools",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@types/three": "^0.185.4",
+    "basic-ftp": "^6.2.1",
+    "jszip": "^3.10.1",
+    "mqtt": "^5.15.2",
+    "next": "16.3.3",
+    "occt-import-js": "^0.0.23",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "three": "^0.185.1",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.3",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
