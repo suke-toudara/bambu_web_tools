@@ -16,6 +16,7 @@ export default function ModelViewer({
   overlappingIds,
   pickFaceMode,
   onFacePicked,
+  onPositionChange,
 }: {
   parts: PlacedPart[];
   selectedId: string | null;
