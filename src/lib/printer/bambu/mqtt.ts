@@ -4,6 +4,37 @@ import type { BambuConnection, BambuStatus } from "./types";
 const MQTT_PORT = 8883;
 const CONNECT_TIMEOUT_MS = 8000;
 
+/** A fresh, increasing sequence_id per command. The well-typed `bambu-node`
+ * reference client does the same instead of a constant "0"; a repeated
+ * sequence_id has been reported elsewhere to make firmware treat a new
+ * command as a stale replay of a previous one. */
+let sequenceCounter = 0;
+function nextSequenceId(): string {
+  sequenceCounter += 1;
+  return String(sequenceCounter);
+}
+
+/**
+ * Every reference LAN-mode client that's confirmed to actually start a
+ * print (bambu-printer-mcp's PrinterStore, bambu-node's BambuClient) keeps
+ * ONE MQTT connection open per printer for as long as the process runs,
+ * rather than connecting fresh for each command. This module used to
+ * connect, publish, and then disconnect (gracefully or not) within a single
+ * call — closing the connection shortly after telling the printer to parse
+ * a file has been observed elsewhere to itself produce the printer-side
+ * "0500-4003 unable to parse print file" error. Cache and reuse a client
+ * per (host, serial, accessCode) instead, and never close it ourselves;
+ * only a connection error/close event evicts it so the next call
+ * reconnects. This process is expected to run as a long-lived Node server
+ * (`next dev` / `next start`), not a per-request serverless function, so
+ * the cache actually persists across requests.
+ */
+const clientCache = new Map<string, MqttClient>();
+
+function cacheKey(conn: BambuConnection): string {
+  return `${conn.host}::${conn.serial}::${conn.accessCode}`;
+}
+
 function connectClient(conn: BambuConnection): Promise<MqttClient> {
   return new Promise((resolve, reject) => {
     const client = mqtt.connect(`mqtts://${conn.host}:${MQTT_PORT}`, {
@@ -29,6 +60,26 @@ function connectClient(conn: BambuConnection): Promise<MqttClient> {
       reject(err);
     });
   });
+}
+
+/** Returns the cached, still-connected client for this printer, or opens
+ * (and caches) a new one. The cache entry is evicted on close/error so a
+ * dead connection doesn't get handed out again. */
+async function getClient(conn: BambuConnection): Promise<MqttClient> {
+  const key = cacheKey(conn);
+  const existing = clientCache.get(key);
+  if (existing && !existing.disconnecting && !existing.disconnected) {
+    return existing;
+  }
+
+  const client = await connectClient(conn);
+  clientCache.set(key, client);
+  const evict = () => {
+    if (clientCache.get(key) === client) clientCache.delete(key);
+  };
+  client.once("close", evict);
+  client.once("error", evict);
+  return client;
 }
 
 function parseStatus(raw: Record<string, unknown>): BambuStatus {
@@ -57,32 +108,34 @@ function parseStatus(raw: Record<string, unknown>): BambuStatus {
   };
 }
 
-/** Opens a short-lived MQTT connection, requests a full status push, waits
- * for the report, then disconnects. Bambu printers push status
- * incrementally (a sparse "hello" first, then a fuller report), so this
- * merges every message received within the settle window. */
+/** Requests a full status push on the (cached, persistent) connection and
+ * waits for the report. Bambu printers push status incrementally (a sparse
+ * "hello" first, then a fuller report), so this merges every message
+ * received within the settle window. The message listener is added and
+ * removed per call so repeated calls on the shared client don't stack up
+ * listeners. */
 export async function getStatus(conn: BambuConnection): Promise<BambuStatus> {
-  const client = await connectClient(conn);
+  const client = await getClient(conn);
   let merged: Record<string, unknown> = {};
+
+  const reportTopic = `device/${conn.serial}/report`;
+  const requestTopic = `device/${conn.serial}/request`;
+
+  const onMessage = (_topic: string, payload: Buffer) => {
+    try {
+      const parsed = JSON.parse(payload.toString());
+      if (parsed?.print && typeof parsed.print === "object") {
+        merged = { ...merged, ...parsed.print };
+      }
+    } catch {
+      // ignore non-JSON / unrelated payloads
+    }
+  };
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const reportTopic = `device/${conn.serial}/report`;
-      const requestTopic = `device/${conn.serial}/request`;
-
       const settleTimer = setTimeout(resolve, 2500);
-
-      client.on("message", (_topic, payload) => {
-        try {
-          const parsed = JSON.parse(payload.toString());
-          if (parsed?.print && typeof parsed.print === "object") {
-            merged = { ...merged, ...parsed.print };
-          }
-        } catch {
-          // ignore non-JSON / unrelated payloads
-        }
-      });
-
+      client.on("message", onMessage);
       client.subscribe(reportTopic, (err) => {
         if (err) {
           clearTimeout(settleTimer);
@@ -91,12 +144,12 @@ export async function getStatus(conn: BambuConnection): Promise<BambuStatus> {
         }
         client.publish(
           requestTopic,
-          JSON.stringify({ pushing: { sequence_id: "0", command: "pushall" } })
+          JSON.stringify({ pushing: { sequence_id: nextSequenceId(), command: "pushall" } })
         );
       });
     });
   } finally {
-    client.end(true);
+    client.removeListener("message", onMessage);
   }
 
   if (Object.keys(merged).length === 0) {
@@ -113,11 +166,11 @@ export async function getStatus(conn: BambuConnection): Promise<BambuStatus> {
 }
 
 /** Waits for `promise`, but gives up (resolves anyway) if it's still
- * pending after `ms` — for a step that's merely "nice to wait for" (a QoS 1
- * PUBACK, a graceful disconnect) so it can't hang the whole request forever
- * if the printer's broker never gets around to it. A genuine rejection
- * reaching us before the timeout still propagates; one arriving after we've
- * already given up is swallowed (nothing is awaiting it any more). */
+ * pending after `ms`. QoS 1's PUBACK isn't guaranteed to arrive promptly
+ * (or at all) from the printer's broker, so this keeps that wait from
+ * hanging a request forever. A genuine rejection reaching us before the
+ * timeout still propagates; one arriving after we've given up is
+ * swallowed (nothing is awaiting it any more). */
 async function orGiveUpAfter(promise: Promise<void>, ms: number): Promise<void> {
   let timer!: ReturnType<typeof setTimeout>;
   const timeout = new Promise<void>((resolve) => {
@@ -131,41 +184,22 @@ async function orGiveUpAfter(promise: Promise<void>, ms: number): Promise<void> 
   promise.catch(() => {});
 }
 
-/** Publishes a raw `{"print": {...}}` command to the printer's request topic
- * and waits for the printer to start acting on it before disconnecting.
- *
- * Two details matter here, both learned the hard way by other LAN-mode
- * clients (see bambuddy's bambu_mqtt.py):
- *  - QoS should be 1, not the default 0 — the printer can silently ignore a
- *    QoS 0 publish while it's busy broadcasting its own status updates. But
- *    the printer's broker isn't guaranteed to PUBACK promptly (or at all),
- *    so waiting for it is bounded (`orGiveUpAfter`) rather than potentially
- *    hanging the request forever. A transport-level publish error (as
- *    opposed to no PUBACK) still surfaces immediately.
- *  - The socket must not be force-closed right after publishing. A print
- *    command (especially `gcode_file`/`project_file`) has the printer
- *    parsing the referenced file; yanking the connection while that's
- *    still in flight has been observed to itself produce the printer-side
- *    "0500-4003 unable to parse print file" error, unrelated to the file's
- *    own validity. Wait, then close gracefully (not `end(true)`) — again
- *    bounded, so a slow/unresponsive graceful close can't hang forever. */
+/** Publishes a raw `{"print": {...}}` command on the (cached, persistent)
+ * connection at QoS 1 (the printer can silently ignore QoS 0 while busy
+ * broadcasting its own status). Deliberately does not disconnect
+ * afterward — see the module doc comment on `clientCache` for why. */
 export async function publishPrintCommand(
   conn: BambuConnection,
   command: Record<string, unknown>
 ): Promise<void> {
-  const client = await connectClient(conn);
-  try {
-    const published = new Promise<void>((resolve, reject) => {
-      client.publish(
-        `device/${conn.serial}/request`,
-        JSON.stringify({ print: { sequence_id: "0", ...command } }),
-        { qos: 1 },
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
-    await orGiveUpAfter(published, 5000);
-    await new Promise((r) => setTimeout(r, 3000));
-  } finally {
-    await orGiveUpAfter(new Promise<void>((resolve) => client.end(false, {}, () => resolve())), 5000);
-  }
+  const client = await getClient(conn);
+  const published = new Promise<void>((resolve, reject) => {
+    client.publish(
+      `device/${conn.serial}/request`,
+      JSON.stringify({ print: { sequence_id: nextSequenceId(), ...command } }),
+      { qos: 1 },
+      (err) => (err ? reject(err) : resolve())
+    );
+  });
+  await orGiveUpAfter(published, 5000);
 }
