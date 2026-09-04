@@ -119,7 +119,6 @@ export default function Home() {
   const [printMessage, setPrintMessage] = useState<string | null>(null);
   const [printErrorMsg, setPrintErrorMsg] = useState<string | null>(null);
 
-  const [useAms, setUseAms] = useState(false);
   const [projectFile, setProjectFile] = useState<File | null>(null);
 
   const [rightTab, setRightTab] = useState<"slice" | "print">("slice");
@@ -360,7 +359,6 @@ export default function Home() {
       form.append("host", printer.host);
       form.append("serial", printer.serial);
       form.append("accessCode", printer.accessCode);
-      form.append("options", JSON.stringify({ useAms }));
       const res = await fetch("/api/printer/print-project", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Failed to start print.");
@@ -684,7 +682,7 @@ export default function Home() {
                   ) : (
                     <div>
                       <p className="mb-3 text-xs text-zinc-500">
-                        Bambu Studio / OrcaSlicerで書き出した「.gcode.3mf」を送信します。AMS・フロー校正などフル機能に対応。
+                        Bambu Studio / OrcaSlicerで書き出した「.gcode.3mf」を送信します。AMSマッピングやフロー校正などはスライス時の設定がそのまま使われます(プリンター本体でファイルを開いた場合と同じ動作です)。
                       </p>
                       <input
                         type="file"
@@ -692,10 +690,6 @@ export default function Home() {
                         onChange={(e) => setProjectFile(e.target.files?.[0] ?? null)}
                         className="block w-full text-sm text-zinc-300 file:mr-3 file:rounded file:border-0 file:bg-zinc-700 file:px-3 file:py-1.5 file:text-white hover:file:bg-zinc-600"
                       />
-                      <label className="mt-2 flex items-center gap-2 text-sm text-zinc-300">
-                        <input type="checkbox" checked={useAms} onChange={(e) => setUseAms(e.target.checked)} />
-                        AMSを使用する
-                      </label>
                       <button
                         disabled={!projectFile || printBusy || !printer.host}
                         onClick={handlePrintProject}

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 import JSZip from "jszip";
 import { ftpUpload } from "./ftp";
@@ -27,29 +26,24 @@ export async function printGcodeFile(
   return { remotePath };
 }
 
-export interface PrintProjectOptions {
-  useAms: boolean;
-  bedType?: string;
-  timelapse?: boolean;
-  bedLeveling?: boolean;
-  flowCalibration?: boolean;
-  vibrationCalibration?: boolean;
-}
-
 /**
  * Uploads a pre-sliced `.gcode.3mf` (exported from Bambu Studio / OrcaSlicer
- * via "Export plate sliced file") and starts it via the `project_file` MQTT
- * command. This is the recommended path for full-featured Bambu prints
- * (correct vendor start gcode, calibration, and — with useAms — AMS
- * filament mapping). P1/A1/X1 series only; H2-series is not supported (see
- * printGcodeFile doc).
+ * via "Export plate sliced file") and starts it via the `gcode_file` MQTT
+ * command, the same way opening the file from the printer's own touchscreen
+ * would. On P1/A1/X1 firmware, the `project_file` command — despite being
+ * the one Bambu Studio/OrcaSlicer use themselves — is rejected for this
+ * container with error 405004002 ("firmware doesn't recognise the
+ * container"); `project_file` only works on H2-series printers, which this
+ * tool does not support (see printGcodeFile doc). Because the printer opens
+ * the container itself, AMS filament mapping, bed leveling, and calibration
+ * are whatever was baked in at slice time / configured on the printer, not
+ * something this command can override.
  */
 export async function printProjectFile(
   conn: BambuConnection,
   fileBuffer: Buffer,
-  fileName: string,
-  options: PrintProjectOptions
-): Promise<{ remotePath: string; plateFile: string; amsMapping: number[] }> {
+  fileName: string
+): Promise<{ remotePath: string; plateFile: string }> {
   const safeName = sanitizeFileName(fileName, ".3mf");
   const remotePath = `cache/${safeName}`;
 
@@ -63,52 +57,15 @@ export async function printProjectFile(
     );
   }
   const plateEntry = plateEntries.sort((a, b) => a.name.localeCompare(b.name))[0];
-  const gcodeBuffer = await plateEntry.async("nodebuffer");
-  const md5 = createHash("md5").update(gcodeBuffer).digest("hex");
-
-  let usedFilamentPositions: number[] = [0];
-  const plateJsonEntry = zip.file(plateEntry.name.replace(/\.gcode$/i, ".json"));
-  if (plateJsonEntry) {
-    try {
-      const json = JSON.parse(await plateJsonEntry.async("string"));
-      if (Array.isArray(json.filament_ids) && json.filament_ids.length > 0) {
-        usedFilamentPositions = json.filament_ids.filter((n: unknown) => Number.isInteger(n));
-      }
-    } catch {
-      // tolerate malformed plate json; fall back to default position [0]
-    }
-  }
-
-  const amsMapping = new Array(5).fill(-1);
-  if (options.useAms) {
-    usedFilamentPositions.forEach((pos, i) => {
-      if (pos < amsMapping.length) amsMapping[pos] = i;
-    });
-  }
 
   await ftpUpload(conn, fileBuffer, `/${remotePath}`);
 
   await publishPrintCommand(conn, {
-    command: "project_file",
-    param: `Metadata/${path.posix.basename(plateEntry.name)}`,
-    url: `file:///sdcard/${remotePath}`,
-    subtask_name: safeName.replace(/\.3mf$/i, ""),
-    md5,
-    flow_cali: options.flowCalibration ?? true,
-    layer_inspect: false,
-    vibration_cali: options.vibrationCalibration ?? true,
-    bed_leveling: options.bedLeveling ?? true,
-    bed_type: options.bedType || "textured_plate",
-    timelapse: options.timelapse ?? false,
-    use_ams: options.useAms,
-    ams_mapping: amsMapping,
-    profile_id: "0",
-    project_id: "0",
-    subtask_id: "0",
-    task_id: "0",
+    command: "gcode_file",
+    param: remotePath,
   });
 
-  return { remotePath, plateFile: plateEntry.name, amsMapping };
+  return { remotePath, plateFile: plateEntry.name };
 }
 
 export async function sendControl(conn: BambuConnection, action: "pause" | "resume" | "stop"): Promise<void> {

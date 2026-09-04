@@ -11,7 +11,6 @@ export async function POST(req: NextRequest) {
     const host = form.get("host");
     const serial = form.get("serial");
     const accessCode = form.get("accessCode");
-    const optionsRaw = form.get("options");
 
     if (!(file instanceof Blob) || typeof host !== "string" || typeof serial !== "string" || typeof accessCode !== "string") {
       return NextResponse.json(
@@ -20,13 +19,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const options = typeof optionsRaw === "string" ? JSON.parse(optionsRaw) : { useAms: false };
     const buffer = Buffer.from(await file.arrayBuffer());
     const result = await printProjectFile(
       { host, serial, accessCode },
       buffer,
-      (file as File).name || "model.gcode.3mf",
-      options
+      (file as File).name || "model.gcode.3mf"
     );
     return NextResponse.json({ status: "success", ...result });
   } catch (err) {
