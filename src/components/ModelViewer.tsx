@@ -27,6 +27,8 @@ export default function ModelViewer({
    * instead of just selecting the part ("place on face" mode). */
   pickFaceMode?: boolean;
   onFacePicked?: (partId: string, worldNormal: [number, number, number]) => void;
+  /** Called when the user finishes dragging a part across the build plate. */
+  onPositionChange?: (partId: string, position: [number, number, number]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const partsRef = useRef(parts);
@@ -35,6 +37,7 @@ export default function ModelViewer({
   const overlappingRef = useRef(overlappingIds);
   const pickFaceModeRef = useRef(pickFaceMode);
   const onFacePickedRef = useRef(onFacePicked);
+  const onPositionChangeRef = useRef(onPositionChange);
 
   useEffect(() => {
     partsRef.current = parts;
@@ -43,6 +46,7 @@ export default function ModelViewer({
     overlappingRef.current = overlappingIds;
     pickFaceModeRef.current = pickFaceMode;
     onFacePickedRef.current = onFacePicked;
+    onPositionChangeRef.current = onPositionChange;
   });
 
   // Scene/camera/renderer are recreated only when the container mounts or
@@ -199,19 +203,103 @@ export default function ModelViewer({
     const pointer = new THREE.Vector2();
     let pointerDownPos: { x: number; y: number } | null = null;
 
-    const onPointerDown = (ev: PointerEvent) => {
-      pointerDownPos = { x: ev.clientX, y: ev.clientY };
-    };
-    const onPointerUp = (ev: PointerEvent) => {
-      if (!pointerDownPos) return;
-      const dx = ev.clientX - pointerDownPos.x;
-      const dy = ev.clientY - pointerDownPos.y;
-      pointerDownPos = null;
-      if (Math.hypot(dx, dy) > 4) return; // was a drag/orbit, not a click
-
+    const setPointerFromEvent = (ev: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    };
+
+    const pickPart = (): { partId: string; group: THREE.Object3D } | null => {
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(partsGroup.children, true);
+      if (hits.length === 0) return null;
+      let obj: THREE.Object3D | null = hits[0].object;
+      while (obj && !obj.userData.partId) obj = obj.parent;
+      if (!obj) return null;
+      return { partId: obj.userData.partId as string, group: obj };
+    };
+
+    // Left-drag on a part slides it across the build plate (XY only, on the
+    // horizontal plane at the part's current height); left-drag on empty
+    // space still orbits the camera as before.
+    let dragCandidate: { partId: string; group: THREE.Object3D } | null = null;
+    let dragging: { partId: string; group: THREE.Object3D; plane: THREE.Plane; offset: THREE.Vector3 } | null = null;
+    const DRAG_THRESHOLD_PX = 4;
+
+    const planeHit = new THREE.Vector3();
+    const startDrag = (candidate: { partId: string; group: THREE.Object3D }) => {
+      raycaster.setFromCamera(pointer, camera);
+      const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -candidate.group.position.z);
+      if (!raycaster.ray.intersectPlane(plane, planeHit)) return;
+      const offset = new THREE.Vector3(
+        candidate.group.position.x - planeHit.x,
+        candidate.group.position.y - planeHit.y,
+        0
+      );
+      dragging = { partId: candidate.partId, group: candidate.group, plane, offset };
+      controls.enabled = false;
+      renderer.domElement.style.cursor = "grabbing";
+      if (selectedRef.current !== candidate.partId) onSelectRef.current(candidate.partId);
+    };
+
+    const endDrag = () => {
+      if (!dragging) return;
+      const g = dragging.group;
+      onPositionChangeRef.current?.(dragging.partId, [
+        Math.round(g.position.x * 100) / 100,
+        Math.round(g.position.y * 100) / 100,
+        Math.round(g.position.z * 100) / 100,
+      ]);
+      dragging = null;
+      controls.enabled = true;
+      renderer.domElement.style.cursor = pickFaceModeRef.current ? "crosshair" : "";
+    };
+
+    // Safety net for a pointer released outside the canvas: end the drag
+    // (if any) and fully clear gesture state so a later hover doesn't think
+    // a drag is still in progress.
+    const onWindowPointerUp = () => {
+      endDrag();
+      pointerDownPos = null;
+      dragCandidate = null;
+    };
+
+    const onPointerDown = (ev: PointerEvent) => {
+      pointerDownPos = { x: ev.clientX, y: ev.clientY };
+      dragCandidate = null;
+      if (ev.button === 0 && !pickFaceModeRef.current) {
+        setPointerFromEvent(ev);
+        dragCandidate = pickPart();
+      }
+    };
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!pointerDownPos) return;
+      setPointerFromEvent(ev);
+      if (dragging) {
+        raycaster.setFromCamera(pointer, camera);
+        if (raycaster.ray.intersectPlane(dragging.plane, planeHit)) {
+          dragging.group.position.x = planeHit.x + dragging.offset.x;
+          dragging.group.position.y = planeHit.y + dragging.offset.y;
+        }
+        return;
+      }
+      if (!dragCandidate) return;
+      const dx = ev.clientX - pointerDownPos.x;
+      const dy = ev.clientY - pointerDownPos.y;
+      if (Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) startDrag(dragCandidate);
+    };
+    const onPointerUp = (ev: PointerEvent) => {
+      if (!pointerDownPos) return;
+      const wasDragging = !!dragging;
+      endDrag();
+      const dx = ev.clientX - pointerDownPos.x;
+      const dy = ev.clientY - pointerDownPos.y;
+      pointerDownPos = null;
+      dragCandidate = null;
+      if (wasDragging) return;
+      if (Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) return; // was a drag/orbit, not a click
+
+      setPointerFromEvent(ev);
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(partsGroup.children, true);
       if (hits.length === 0) {
@@ -233,7 +321,10 @@ export default function ModelViewer({
       onSelectRef.current(partId);
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointerup", onWindowPointerUp);
+    window.addEventListener("pointercancel", onWindowPointerUp);
 
     const resize = () => {
       const w = container.clientWidth;
@@ -250,6 +341,9 @@ export default function ModelViewer({
     const animate = () => {
       frameId = requestAnimationFrame(animate);
       controls.update();
+      // Keep selection/overlap outlines glued to their part while it's
+      // being dragged, without rebuilding them every frame.
+      for (const box of highlightBoxes) box.update();
       renderer.render(scene, camera);
     };
     animate();
@@ -269,7 +363,10 @@ export default function ModelViewer({
       cancelAnimationFrame(frameId);
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointerup", onWindowPointerUp);
+      window.removeEventListener("pointercancel", onWindowPointerUp);
       controls.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
