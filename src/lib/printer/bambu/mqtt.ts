@@ -113,7 +113,18 @@ export async function getStatus(conn: BambuConnection): Promise<BambuStatus> {
 }
 
 /** Publishes a raw `{"print": {...}}` command to the printer's request topic
- * and waits briefly for it to be flushed before disconnecting. */
+ * and waits for the printer to start acting on it before disconnecting.
+ *
+ * Two details matter here, both learned the hard way by other LAN-mode
+ * clients (see bambuddy's bambu_mqtt.py):
+ *  - QoS must be 1, not the default 0. The printer can silently ignore a
+ *    QoS 0 publish while it's busy broadcasting its own status updates.
+ *  - The socket must not be force-closed right after publishing. A print
+ *    command (especially `gcode_file`/`project_file`) has the printer
+ *    parsing the referenced file; yanking the connection while that's
+ *    still in flight has been observed to itself produce the printer-side
+ *    "0500-4003 unable to parse print file" error, unrelated to the file's
+ *    own validity. Wait, then close gracefully (not `end(true)`). */
 export async function publishPrintCommand(
   conn: BambuConnection,
   command: Record<string, unknown>
@@ -124,11 +135,12 @@ export async function publishPrintCommand(
       client.publish(
         `device/${conn.serial}/request`,
         JSON.stringify({ print: { sequence_id: "0", ...command } }),
+        { qos: 1 },
         (err) => (err ? reject(err) : resolve())
       );
     });
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 3000));
   } finally {
-    client.end(true);
+    await new Promise<void>((resolve) => client.end(false, {}, () => resolve()));
   }
 }
