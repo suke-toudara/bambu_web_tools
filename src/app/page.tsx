@@ -10,12 +10,20 @@ import { partWorldBounds, placePartOnFaceDown } from "@/lib/scene/transform";
 import type { PlacedPart } from "@/lib/scene/types";
 import { meshToBinaryStl } from "@/lib/stl/exportBinaryStl";
 import { DEFAULT_SLICE_SETTINGS, type SliceSettings } from "@/lib/slicer/types";
-import type { LayerPreviewData } from "@/components/LayerPreview";
+import type { ToolpathLayer } from "@/lib/slicer/toolpath";
+import {
+  FILAMENT_PROFILES,
+  applyFilamentProfile,
+  getFilamentProfile,
+  matchesFilamentProfile,
+} from "@/lib/slicer/filaments";
+import type { FilamentId, InfillPattern } from "@/lib/slicer/types";
+import { INFILL_PATTERNS, getInfillPattern } from "@/lib/slicer/infill";
 import PartList from "@/components/PartList";
 import PrinterProfiles, { type SavedPrinter } from "@/components/PrinterProfiles";
 
 const ModelViewer = dynamic(() => import("@/components/ModelViewer"), { ssr: false });
-const LayerPreview = dynamic(() => import("@/components/LayerPreview"), { ssr: false });
+const ToolpathPreview = dynamic(() => import("@/components/ToolpathPreview"), { ssr: false });
 
 interface SliceStats {
   layerCount: number;
@@ -104,7 +112,7 @@ export default function Home() {
   const [sliceError, setSliceError] = useState<string | null>(null);
   const [gcode, setGcode] = useState<string | null>(null);
   const [stats, setStats] = useState<SliceStats | null>(null);
-  const [layerPreview, setLayerPreview] = useState<LayerPreviewData[]>([]);
+  const [toolpath, setToolpath] = useState<ToolpathLayer[]>([]);
 
   const [printer, setPrinter] = useState<PrinterConn>(loadPrinterConn);
   const [savedPrinters, setSavedPrinters] = useState<SavedPrinter[]>(loadSavedPrinters);
@@ -175,7 +183,7 @@ export default function Home() {
   function invalidateSlice() {
     setGcode(null);
     setStats(null);
-    setLayerPreview([]);
+    setToolpath([]);
   }
 
   async function handleFiles(files: FileList) {
@@ -259,7 +267,7 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error || "Slicing failed.");
       setGcode(data.gcode);
       setStats(data.stats);
-      setLayerPreview(data.layerPreview);
+      setToolpath(data.toolpath);
     } catch (err) {
       setSliceError(err instanceof Error ? err.message : "Slicing failed.");
     } finally {
@@ -516,6 +524,43 @@ export default function Home() {
               <div className="flex flex-col gap-4">
                 <Card>
                   <h2 className="mb-3 text-sm font-semibold text-zinc-200">スライス設定</h2>
+
+                  <div className="mb-3">
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-zinc-400">フィラメント</span>
+                      <select
+                        value={settings.filament}
+                        onChange={(e) =>
+                          setSettings((s) => applyFilamentProfile(s, e.target.value as FilamentId))
+                        }
+                        className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-zinc-100"
+                      >
+                        {FILAMENT_PROFILES.map((f) => (
+                          <option key={f.id} value={f.id}>{f.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    {!matchesFilamentProfile(settings) && (
+                      <button
+                        onClick={() => setSettings((s) => applyFilamentProfile(s, s.filament))}
+                        className="mt-1.5 text-xs text-blue-400 hover:underline"
+                      >
+                        温度・速度を手動で変更中です。{getFilamentProfile(settings.filament).label}の推奨値に戻す
+                      </button>
+                    )}
+                    {getFilamentProfile(settings.filament).warnings.map((warning) => (
+                      <p
+                        key={warning}
+                        className="mt-1.5 rounded border border-amber-800 bg-amber-950/40 px-2 py-1 text-xs leading-relaxed text-amber-300"
+                      >
+                        ⚠️ {warning}
+                      </p>
+                    ))}
+                    {getFilamentProfile(settings.filament).hints.map((hint) => (
+                      <p key={hint} className="mt-1 text-xs leading-relaxed text-zinc-500">{hint}</p>
+                    ))}
+                  </div>
+
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <NumberField label="レイヤー高さ (mm)" value={settings.layerHeightMm} step={0.02}
                       onChange={(v) => setSettings((s) => ({ ...s, layerHeightMm: v }))} />
@@ -523,6 +568,20 @@ export default function Home() {
                       onChange={(v) => setSettings((s) => ({ ...s, wallLoops: Math.round(v) }))} />
                     <NumberField label="インフィル密度 (%)" value={settings.infillDensityPct} step={5} min={0} max={100}
                       onChange={(v) => setSettings((s) => ({ ...s, infillDensityPct: v }))} />
+                    <label className="flex flex-col gap-1">
+                      <span className="text-zinc-400">インフィルパターン</span>
+                      <select
+                        value={settings.infillPattern}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, infillPattern: e.target.value as InfillPattern }))
+                        }
+                        className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-zinc-100"
+                      >
+                        {INFILL_PATTERNS.map((p) => (
+                          <option key={p.id} value={p.id}>{p.label}</option>
+                        ))}
+                      </select>
+                    </label>
                     <NumberField label="上下ソリッド層" value={settings.topBottomLayers} step={1} min={0}
                       onChange={(v) => setSettings((s) => ({ ...s, topBottomLayers: Math.round(v) }))} />
                     <NumberField label="ノズル温度 (℃)" value={settings.nozzleTempC} step={5}
@@ -534,6 +593,10 @@ export default function Home() {
                     <NumberField label="押出幅 (mm)" value={settings.extrusionWidthMm} step={0.02}
                       onChange={(v) => setSettings((s) => ({ ...s, extrusionWidthMm: v }))} />
                   </div>
+
+                  <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                    {getInfillPattern(settings.infillPattern).description}
+                  </p>
 
                   <div className="mt-4 border-t border-zinc-800 pt-3">
                     <label className="flex items-center gap-2 text-sm text-zinc-300">
@@ -592,7 +655,11 @@ export default function Home() {
                       <dd>{stats.estimatedFilamentGrams.toFixed(1)} g</dd>
                     </dl>
                     <div className="mt-4">
-                      <LayerPreview layers={layerPreview} />
+                      <ToolpathPreview
+                        layers={toolpath}
+                        bedSizeXMm={settings.bedSizeXMm}
+                        bedSizeYMm={settings.bedSizeYMm}
+                      />
                     </div>
                     <div className="mt-4 flex items-center gap-3">
                       <button

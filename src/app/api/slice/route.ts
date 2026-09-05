@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseStl } from "@/lib/stl/parseBinaryStl";
 import { sliceMesh } from "@/lib/slicer/slice";
 import { generateGcode } from "@/lib/slicer/gcode";
+import { buildToolpath } from "@/lib/slicer/toolpath";
 import { DEFAULT_SLICE_SETTINGS, type SliceSettings } from "@/lib/slicer/types";
 
 export const runtime = "nodejs";
@@ -59,12 +60,10 @@ export async function POST(req: NextRequest) {
         boundsMin: result.boundsMin,
         boundsMax: result.boundsMax,
       },
-      // Lightweight per-layer polygon preview (skip infill lines to keep payload small).
-      layerPreview: result.layers.map((l) => ({
-        z: l.z,
-        perimeters: l.perimeters,
-        supports: l.supports,
-      })),
+      // Full per-layer toolpath (walls, solid, infill, supports) as flat
+      // rounded coordinate arrays — compact enough to ship in full, so the
+      // viewer can show the real paths rather than just wall outlines.
+      toolpath: buildToolpath(result),
     });
   } catch (err) {
     console.error("slice error", err);

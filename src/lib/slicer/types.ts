@@ -21,6 +21,28 @@ export interface Triangle {
  * order, for both outer boundaries (CCW) and holes (CW)). */
 export type Loop = Vec2[];
 
+/** Identifies a material preset in `slicer/filaments.ts`. */
+export type FilamentId =
+  | "pla"
+  | "pla-cf"
+  | "petg"
+  | "petg-cf"
+  | "tpu95a"
+  | "abs"
+  | "asa"
+  | "pc"
+  | "pa-cf";
+
+/** How sparse infill is laid down. See `slicer/infill.ts`. */
+export type InfillPattern =
+  | "lines"
+  | "grid"
+  | "triangles"
+  | "cubic"
+  | "concentric"
+  | "honeycomb"
+  | "gyroid";
+
 export interface SliceSettings {
   layerHeightMm: number;
   firstLayerHeightMm: number;
@@ -30,6 +52,11 @@ export interface SliceSettings {
   wallLoops: number;
   topBottomLayers: number;
   infillDensityPct: number; // 0-100
+  infillPattern: InfillPattern;
+  /** Material preset in use; drives temperatures, speeds and density. */
+  filament: FilamentId;
+  /** g/cm^3 for the selected material, used for the weight estimate. */
+  filamentDensityGCm3: number;
   printSpeedMmS: number;
   firstLayerSpeedMmS: number;
   travelSpeedMmS: number;
@@ -64,6 +91,9 @@ export const DEFAULT_SLICE_SETTINGS: SliceSettings = {
   wallLoops: 2,
   topBottomLayers: 3,
   infillDensityPct: 15,
+  infillPattern: "grid",
+  filament: "pla",
+  filamentDensityGCm3: 1.24,
   printSpeedMmS: 60,
   firstLayerSpeedMmS: 20,
   travelSpeedMmS: 150,

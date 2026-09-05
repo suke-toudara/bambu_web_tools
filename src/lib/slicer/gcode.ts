@@ -1,4 +1,5 @@
 import type { Loop, SliceResult, SliceSettings, Vec2 } from "./types";
+import { getFilamentProfile } from "./filaments";
 
 class GcodeWriter {
   private lines: string[] = [];
@@ -30,6 +31,7 @@ function writeHeaderBlock(w: GcodeWriter, result: SliceResult, settings: SliceSe
   const filamentArea = Math.PI * (settings.filamentDiameterMm / 2) ** 2;
   const filamentVolumeCm3 = (result.estimatedFilamentMm * filamentArea) / 1000;
   const maxZ = result.boundsMax.z - result.boundsMin.z;
+  const filament = getFilamentProfile(settings.filament);
 
   w.push("; HEADER_BLOCK_START");
   w.push("; BambuStudio 01.09.00.63");
@@ -39,6 +41,7 @@ function writeHeaderBlock(w: GcodeWriter, result: SliceResult, settings: SliceSe
   w.push(`; total filament length [mm] : ${result.estimatedFilamentMm.toFixed(2)}`);
   w.push(`; total filament volume [cm^3] : ${filamentVolumeCm3.toFixed(2)}`);
   w.push(`; total filament weight [g] : ${result.estimatedFilamentGrams.toFixed(2)}`);
+  w.push(`; filament_density : ${filament.densityGCm3}`);
   w.push(`; filament_diameter : ${settings.filamentDiameterMm}`);
   w.push(`; max_z_height : ${maxZ.toFixed(2)}`);
   w.push("; HEADER_BLOCK_END");
@@ -50,6 +53,7 @@ function writeHeaderBlock(w: GcodeWriter, result: SliceResult, settings: SliceSe
   w.push(`; line_width = ${settings.extrusionWidthMm}`);
   w.push(`; wall_loops = ${settings.wallLoops}`);
   w.push(`; sparse_infill_density = ${settings.infillDensityPct}%`);
+  w.push(`; sparse_infill_pattern = ${settings.infillPattern}`);
   w.push(`; outer_wall_speed = ${settings.printSpeedMmS}`);
   w.push(`; initial_layer_speed = ${settings.firstLayerSpeedMmS}`);
   w.push(`; travel_speed = ${settings.travelSpeedMmS}`);
@@ -58,7 +62,7 @@ function writeHeaderBlock(w: GcodeWriter, result: SliceResult, settings: SliceSe
   w.push(`; bed_temperature = ${settings.bedTempC}`);
   w.push(`; hot_plate_temp = ${settings.bedTempC}`);
   w.push(`; fan_max_speed = ${settings.fanSpeedPct}`);
-  w.push(`; filament_type = PLA`);
+  w.push(`; filament_type = ${filament.gcodeType}`);
   w.push("; CONFIG_BLOCK_END");
   w.push(";");
 }
@@ -142,12 +146,21 @@ export function generateGcode(result: SliceResult, settings: SliceSettings): str
   };
 
   const printSegments = (segs: [Vec2, Vec2][], offset: Vec2, layerH: number, feedMmS: number) => {
+    // Infill generators emit chained runs (see chainSegments): when a segment
+    // starts where the previous one ended, keep extruding straight through
+    // instead of retracting and travelling. Without this, a gyroid or
+    // honeycomb layer costs one retract per short segment — thousands per
+    // layer — which is both painfully slow and a stringing machine.
+    let cursor: Vec2 | null = null;
     for (const [a, b] of segs) {
       const pa = { x: a.x + offset.x, y: a.y + offset.y };
       const pb = { x: b.x + offset.x, y: b.y + offset.y };
-      travelTo(pa, settings.travelSpeedMmS);
-      unretractIfNeeded();
+      if (!cursor || Math.hypot(cursor.x - pa.x, cursor.y - pa.y) > 1e-3) {
+        travelTo(pa, settings.travelSpeedMmS);
+        unretractIfNeeded();
+      }
       extrudeSegment(pa, pb, layerH, feedMmS);
+      cursor = pb;
     }
   };
 

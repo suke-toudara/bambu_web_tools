@@ -1,5 +1,6 @@
 import type { Loop, SliceSettings, SliceResult, SupportPillar, Triangle, Vec2, Vec3 } from "./types";
 import { insetLoop, scanlineFill } from "./polygon";
+import { generateInfill } from "./infill";
 import { generateSupportPillars, pillarSquareLoop } from "./support";
 
 function key(p: Vec2, precision = 10000): string {
@@ -166,14 +167,23 @@ export function sliceMesh(triangles: Triangle[], settings: SliceSettings): Slice
 
     let infill: [Vec2, Vec2][] = [];
     let solid: [Vec2, Vec2][] = [];
-    const angle = (i % 2 === 0 ? 45 : 135) * (Math.PI / 180);
 
     if (innerBoundary.length > 0) {
       if (isTopBottom || settings.infillDensityPct >= 100) {
+        // Solid layers stay straight lines whatever the sparse pattern is —
+        // the point of a top/bottom shell is full coverage, and alternating
+        // 45/135 gives the best surface.
+        const angle = (i % 2 === 0 ? 45 : 135) * (Math.PI / 180);
         solid = scanlineFill(innerBoundary, settings.extrusionWidthMm, angle);
       } else if (settings.infillDensityPct > 0) {
-        const spacing = settings.extrusionWidthMm / (settings.infillDensityPct / 100);
-        infill = scanlineFill(innerBoundary, spacing, angle);
+        infill = generateInfill(
+          innerBoundary,
+          settings.infillPattern,
+          settings.infillDensityPct,
+          settings.extrusionWidthMm,
+          i,
+          planeZ
+        );
       }
     }
 
@@ -198,9 +208,10 @@ export function sliceMesh(triangles: Triangle[], settings: SliceSettings): Slice
   }
 
   const estimatedFilamentMm = totalExtrudedVolumeMm3 / filamentArea;
-  const PLA_DENSITY_G_PER_CM3 = 1.24;
+  // Density comes from the selected material preset; this used to be
+  // hard-coded to PLA, so a PETG or ABS print reported the wrong weight.
   const estimatedFilamentGrams =
-    (totalExtrudedVolumeMm3 / 1000) * PLA_DENSITY_G_PER_CM3;
+    (totalExtrudedVolumeMm3 / 1000) * settings.filamentDensityGCm3;
 
   return {
     layers,
